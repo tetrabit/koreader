@@ -52,6 +52,8 @@ load_kindlefetch_environment() {
     COMPACT_OUTPUT=false
     ENFORCE_DNS=false
     RESULTS_PER_PAGE=10
+    COVER_CACHE=false
+    COVER_CACHE_LIMIT=8
     KINDLE_DOCUMENTS="$BASE_DIR/documents"
     ZLIB_AUTH=false
 
@@ -94,6 +96,8 @@ command_probe() {
     print_marker "FOUND" "1"
     print_marker "ROOT" "$KF_ROOT"
     print_marker "DOCS" "$KINDLE_DOCUMENTS"
+    print_marker "COVER_CACHE" "$COVER_CACHE"
+    print_marker "COVER_CACHE_LIMIT" "$COVER_CACHE_LIMIT"
     return 0
 }
 
@@ -196,7 +200,7 @@ command_search() {
                 count = 0
             }
             NR > 1 {
-                title = ""; author = ""; md5 = ""; format = ""; description = ""
+                title = ""; author = ""; md5 = ""; format = ""; size = ""; description = ""; cover_url = ""
 
                 if (match($0, /href="\/md5\/[a-f0-9]+"/)) {
                     md5 = substr($0, RSTART + 11, RLENGTH - 12)
@@ -218,6 +222,24 @@ command_search() {
                     }
                 }
 
+                if (match($0, /<img[^>]*data-src="[^"]+"/)) {
+                    block = substr($0, RSTART, RLENGTH)
+                    if (match(block, /data-src="[^"]+"/)) {
+                        cover_url = substr(block, RSTART + 10, RLENGTH - 11)
+                    }
+                }
+                if (cover_url == "" && match($0, /<img[^>]*src="[^"]+"/)) {
+                    block = substr($0, RSTART, RLENGTH)
+                    if (match(block, /src="[^"]+"/)) {
+                        cover_url = substr(block, RSTART + 5, RLENGTH - 6)
+                    }
+                }
+                if (cover_url ~ /^\/\//) {
+                    cover_url = "https:" cover_url
+                } else if (cover_url ~ /^\//) {
+                    cover_url = base_url cover_url
+                }
+
                 if (match($0, /<div class="text-gray-800[^>]*>[^<]+/)) {
                     line = substr($0, RSTART, RLENGTH)
                     if (match(line, />[^<]+/)) {
@@ -225,6 +247,9 @@ command_search() {
                         n = split(content, parts, " · ")
                         if (n >= 2) {
                             format = parts[2]
+                        }
+                        if (match(content, /[0-9]+([.][0-9]+)?[[:space:]]*[KkMmGgTt][Bb]/)) {
+                            size = substr(content, RSTART, RLENGTH)
                         }
                     }
                 }
@@ -244,24 +269,32 @@ command_search() {
 
                 gsub(/[\r\n\t]+/, " ", title)
                 gsub(/[\r\n\t]+/, " ", author)
+                gsub(/[\r\n\t]+/, " ", size)
                 gsub(/[\r\n\t]+/, " ", description)
+                gsub(/[\r\n\t]+/, " ", cover_url)
                 gsub(/[ ]+/, " ", title)
                 gsub(/[ ]+/, " ", author)
+                gsub(/[ ]+/, " ", size)
                 gsub(/[ ]+/, " ", description)
+                gsub(/[ ]+/, " ", cover_url)
                 gsub(/^[ ]+|[ ]+$/, "", title)
                 gsub(/^[ ]+|[ ]+$/, "", author)
+                gsub(/^[ ]+|[ ]+$/, "", size)
                 gsub(/^[ ]+|[ ]+$/, "", description)
+                gsub(/^[ ]+|[ ]+$/, "", cover_url)
 
                 gsub(/"/, "\\\"", title)
                 gsub(/"/, "\\\"", author)
+                gsub(/"/, "\\\"", size)
                 gsub(/"/, "\\\"", description)
+                gsub(/"/, "\\\"", cover_url)
 
                 format_lc = tolower(format)
                 if (title != "" && (format_lc == "epub" || format_lc == "pdf")) {
                     if (count > 0) {
                         printf ",\n"
                     }
-                    printf "  {\"author\": \"%s\", \"format\": \"%s\", \"md5\": \"%s\", \"title\": \"%s\", \"url\": \"%s/md5/%s\", \"description\": \"%s\"}", author, format, md5, title, base_url, md5, description
+                    printf "  {\"author\": \"%s\", \"cover_url\": \"%s\", \"format\": \"%s\", \"md5\": \"%s\", \"size\": \"%s\", \"title\": \"%s\", \"url\": \"%s/md5/%s\", \"description\": \"%s\"}", author, cover_url, format, md5, size, title, base_url, md5, description
                     count++
                 }
             }
@@ -376,6 +409,57 @@ $err_summary"
     return 1
 }
 
+command_cache_covers() {
+    results_file="$TMP_DIR/search_results.json"
+    limit=""
+    force="false"
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --results-file)
+                results_file="$2"
+                shift 2
+                ;;
+            --limit)
+                limit="$2"
+                shift 2
+                ;;
+            --force)
+                force="true"
+                shift
+                ;;
+            *)
+                echo "Unknown cache-covers option: $1" >&2
+                return 2
+                ;;
+        esac
+    done
+
+    if ! load_kindlefetch_environment; then
+        echo "KindleFetch installation not found." >&2
+        return 1
+    fi
+
+    if [ ! -f "$results_file" ]; then
+        echo "Results file not found: $results_file" >&2
+        return 1
+    fi
+
+    if [ -z "$limit" ]; then
+        limit="$COVER_CACHE_LIMIT"
+    fi
+
+    if [ "$COVER_CACHE" != "true" ] && [ "$force" != "true" ]; then
+        print_marker "COVER_CACHE_ENABLED" "0"
+        return 0
+    fi
+
+    cache_search_result_covers "$results_file" "$limit" "$force" >/dev/null 2>&1 &
+    print_marker "COVER_CACHE_ENABLED" "1"
+    print_marker "COVER_CACHE_STARTED" "1"
+    return 0
+}
+
 while [ $# -gt 0 ]; do
     case "$1" in
         --root)
@@ -386,7 +470,7 @@ while [ $# -gt 0 ]; do
             shift
             break
             ;;
-        probe|search|download)
+        probe|search|download|cache-covers)
             break
             ;;
         *)
@@ -408,8 +492,11 @@ case "$command" in
     download)
         command_download "$@"
         ;;
+    cache-covers)
+        command_cache_covers "$@"
+        ;;
     *)
-        echo "Usage: $0 [--root PATH] {probe|search|download} ..." >&2
+        echo "Usage: $0 [--root PATH] {probe|search|download|cache-covers} ..." >&2
         exit 2
         ;;
 esac

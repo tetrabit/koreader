@@ -165,7 +165,7 @@ function KindleFetch:setSourceFilter(filter)
 end
 
 function KindleFetch:onKindleFetchSearch()
-    self:openBrowser()
+    self:openBrowser(1)
     return true
 end
 
@@ -212,9 +212,9 @@ function KindleFetch:getKindleFetchRoot()
     return nil
 end
 
-function KindleFetch:openBrowser()
+function KindleFetch:openBrowser(initial_tab)
     if self.browser and self.browser:isShown() then
-        self.browser:refresh()
+        self.browser:refresh(initial_tab)
         return true
     end
 
@@ -222,13 +222,13 @@ function KindleFetch:openBrowser()
     self.browser = Browser:new{
         manager = self,
     }
-    self.browser:show()
+    self.browser:show(initial_tab)
     return true
 end
 
-function KindleFetch:refreshBrowser()
+function KindleFetch:refreshBrowser(tab_index)
     if self.browser and self.browser:isShown() then
-        self.browser:refresh()
+        self.browser:refresh(tab_index)
     end
 end
 
@@ -248,139 +248,242 @@ function KindleFetch:onCloseWidget()
     end
 end
 
-function KindleFetch:getBrowserTitle()
-    if self.search_state then
-        return T(
-            _("KindleFetch: %1 (page %2/%3)"),
-            self.search_state.query,
-            self.search_state.page,
-            self.search_state.last_page
-        )
+local function clearTabItems(tab)
+    for i = #tab, 1, -1 do
+        tab[i] = nil
     end
-    return _("KindleFetch")
 end
 
-function KindleFetch:getBrowserItemTable()
-    local items = {}
+function KindleFetch:getBrowserTabs()
+    return {
+        self:getSearchTab(),
+        self:getResultsTab(),
+        self:getSettingsTab(),
+    }
+end
+
+function KindleFetch:getSearchTab()
+    local tab = {
+        text = _("Search"),
+        icon = "appbar.search",
+    }
+    tab.callback = function()
+        self:populateSearchTab(tab)
+    end
+    self:populateSearchTab(tab)
+    return tab
+end
+
+function KindleFetch:populateSearchTab(tab)
+    clearTabItems(tab)
+
     local state = self.search_state
-    local root = self:getKindleFetchRoot()
-
     if state then
-        table.insert(items, {
-            text = _("New search"),
-            mandatory = T(_("Current: %1"), state.query),
-            action = "search",
+        table.insert(tab, {
+            text = T(_("Current: %1"), state.query),
+            enabled = false,
         })
-        if state.page > 1 then
-            table.insert(items, {
-                text = _("Previous page"),
-                action = "page_prev",
-            })
-        end
-        if state.page < state.last_page then
-            table.insert(items, {
-                text = _("Next page"),
-                action = "page_next",
-            })
-        end
-    else
-        table.insert(items, {
-            text = _("Start new search"),
-            action = "search",
+        table.insert(tab, {
+            text = T(_("Page: %1/%2"), state.page, state.last_page),
+            enabled = false,
+        })
+    elseif self.last_query and self.last_query ~= "" then
+        table.insert(tab, {
+            text = T(_("Last query: %1"), self.last_query),
+            enabled = false,
         })
     end
 
-    table.insert(items, {
-        text = T(_("Default source: %1"), SOURCE_LABELS[self.default_source]),
-        action = "default_source",
-    })
-    table.insert(items, {
-        text = T(_("Search filter: %1"), FILTER_LABELS[self.source_filter]),
-        action = "source_filter",
-    })
-    table.insert(items, {
-        text = _("Set KindleFetch root path"),
-        action = "set_root",
-    })
-    table.insert(items, {
-        text = root and T(_("Detected root: %1"), BD.dirpath(root)) or _("Detected root: not found"),
-        enabled = false,
+    table.insert(tab, {
+        text = _("New search"),
+        keep_menu_open = true,
+        callback = function()
+            self:showSearchDialog(self.last_query)
+        end,
     })
 
+    if state and state.page > 1 then
+        table.insert(tab, {
+            text = _("Previous page"),
+            keep_menu_open = true,
+            callback = function()
+                self:startSearch(state.query, state.page - 1)
+            end,
+        })
+    end
+
+    if state and state.last_page > 1 then
+        table.insert(tab, {
+            text = _("Jump to page"),
+            keep_menu_open = true,
+            callback = function()
+                self:showJumpToPageDialog()
+            end,
+        })
+    end
+end
+
+function KindleFetch:getResultsTab()
+    local tab = {
+        text = _("Results"),
+        icon = "appbar.filebrowser",
+    }
+    tab.callback = function()
+        self:populateResultsTab(tab)
+    end
+    self:populateResultsTab(tab)
+    return tab
+end
+
+function KindleFetch:formatResultLine(book)
+    local title = util.trim(book.title or "")
+    local author = util.trim(book.author or "")
+    local size = util.trim(book.size or "")
+    if title == "" then
+        title = _("Untitled")
+    end
+    if author == "" then
+        author = _("Unknown author")
+    end
+    if size == "" then
+        size = _("Unknown size")
+    end
+    return T(_("%1 | %2 | %3"), title, author, size)
+end
+
+function KindleFetch:populateResultsTab(tab)
+    clearTabItems(tab)
+
+    local state = self.search_state
     if not state then
-        return items
+        table.insert(tab, {
+            text = _("No active search."),
+            enabled = false,
+        })
+        table.insert(tab, {
+            text = _("Run a search from the Search tab."),
+            enabled = false,
+        })
+        return
     end
 
-    table.insert(items, {
-        text = T(_("Results (%1)"), #state.results),
+    table.insert(tab, {
+        text = T(_("Query: %1"), state.query),
         enabled = false,
     })
+    table.insert(tab, {
+        text = T(_("Page: %1/%2"), state.page, state.last_page),
+        enabled = false,
+    })
+    table.insert(tab, {
+        text = _("Title | Author | Size"),
+        enabled = false,
+    })
+
     if #state.results == 0 then
-        table.insert(items, {
+        table.insert(tab, {
             text = _("No results on this page."),
             enabled = false,
         })
-        return items
+        return
     end
 
     for i, book in ipairs(state.results) do
-        local title = util.trim(book.title or "")
-        local author = util.trim(book.author or "")
-        local format = util.trim(book.format or "")
-        if title == "" then
-            title = _("Untitled")
-        end
-        if author == "" then
-            author = _("Unknown author")
-        end
-        if format == "" then
-            format = "?"
-        end
-        table.insert(items, {
-            text = title,
-            mandatory = T("%1 | %2", author, format),
-            action = "result",
-            result_index = i,
-            book = book,
+        local result_index = i
+        local result_book = book
+        table.insert(tab, {
+            text = self:formatResultLine(result_book),
+            keep_menu_open = true,
+            callback = function()
+                self:showBookDetails(result_index, result_book)
+            end,
         })
     end
-
-    return items
 end
 
-function KindleFetch:onBrowserItemSelected(item)
-    if not item or not item.action then
-        return
+function KindleFetch:getSettingsTab()
+    local tab = {
+        text = _("Settings"),
+        icon = "appbar.settings",
+    }
+    tab.callback = function()
+        self:populateSettingsTab(tab)
     end
+    self:populateSettingsTab(tab)
+    return tab
+end
 
-    if item.action == "search" then
-        self:showSearchDialog(self.last_query)
+function KindleFetch:populateSettingsTab(tab)
+    clearTabItems(tab)
+
+    local root = self:getKindleFetchRoot()
+    table.insert(tab, {
+        text = T(_("Default source: %1"), SOURCE_LABELS[self.default_source]),
+        keep_menu_open = true,
+        callback = function()
+            self:showDefaultSourceDialog()
+        end,
+    })
+    table.insert(tab, {
+        text = T(_("Search filter: %1"), FILTER_LABELS[self.source_filter]),
+        keep_menu_open = true,
+        callback = function()
+            self:showSourceFilterDialog()
+        end,
+    })
+    table.insert(tab, {
+        text = _("Set KindleFetch root path"),
+        keep_menu_open = true,
+        callback = function()
+            self:showSetRootDialog()
+        end,
+    })
+    table.insert(tab, {
+        text = root and T(_("Detected root: %1"), BD.dirpath(root)) or _("Detected root: not found"),
+        enabled = false,
+    })
+end
+
+function KindleFetch:showJumpToPageDialog()
+    if not self.search_state then
         return
     end
-    if item.action == "page_prev" and self.search_state then
-        self:startSearch(self.search_state.query, self.search_state.page - 1)
-        return
-    end
-    if item.action == "page_next" and self.search_state then
-        self:startSearch(self.search_state.query, self.search_state.page + 1)
-        return
-    end
-    if item.action == "default_source" then
-        self:showDefaultSourceDialog()
-        return
-    end
-    if item.action == "source_filter" then
-        self:showSourceFilterDialog()
-        return
-    end
-    if item.action == "set_root" then
-        self:showSetRootDialog()
-        return
-    end
-    if item.action == "result" and item.result_index and item.book then
-        self:onSelectResult(item.result_index, item.book)
-        return
-    end
+    local state = self.search_state
+    local dialog
+    dialog = InputDialog:new{
+        title = _("Jump to page"),
+        description = T(_("Enter page number (1-%1)."), state.last_page),
+        input = tostring(state.page),
+        input_hint = "1",
+        buttons = {
+            {
+                {
+                    text = _("Cancel"),
+                    id = "close",
+                    callback = function()
+                        UIManager:close(dialog)
+                    end,
+                },
+                {
+                    text = _("Go"),
+                    is_enter_default = true,
+                    callback = function()
+                        local page = tonumber(util.trim(dialog:getInputText() or ""))
+                        if not page or page < 1 or page > state.last_page then
+                            UIManager:show(InfoMessage:new{
+                                text = T(_("Page must be between 1 and %1."), state.last_page),
+                            })
+                            return
+                        end
+                        UIManager:close(dialog)
+                        self:startSearch(state.query, page)
+                    end,
+                },
+            },
+        },
+    }
+    UIManager:show(dialog)
+    dialog:onShowKeyboard()
 end
 
 function KindleFetch:showDefaultSourceDialog()
@@ -524,6 +627,25 @@ function KindleFetch:runBridgeCommand(args, progress_text)
     return true, output
 end
 
+function KindleFetch:spawnBridgeCommand(args)
+    if lfs.attributes(self:getBridgePath(), "mode") ~= "file" then
+        return false
+    end
+
+    local cmd_args = { self:getBridgePath(), }
+    local root = self:getKindleFetchRoot()
+    if root then
+        table.insert(cmd_args, "--root")
+        table.insert(cmd_args, root)
+    end
+    for _, arg in ipairs(args) do
+        table.insert(cmd_args, arg)
+    end
+
+    os.execute("sh " .. util.shell_escape(cmd_args) .. " >/dev/null 2>&1 &")
+    return true
+end
+
 function KindleFetch:getMarker(output, key)
     return output and output:match("__KF_" .. key .. "__=([^\n\r]+)")
 end
@@ -627,6 +749,11 @@ function KindleFetch:startSearch(query, page)
             results = results,
         }
         self:showResultsDialog()
+        UIManager:nextTick(function()
+            pcall(function()
+                self:prefetchResultCovers(results)
+            end)
+        end)
     end)
 end
 
@@ -647,8 +774,8 @@ function KindleFetch:readSearchResults(path)
 end
 
 function KindleFetch:showResultsDialog()
-    self:openBrowser()
-    self:refreshBrowser()
+    self:openBrowser(2)
+    self:refreshBrowser(2)
 end
 
 function KindleFetch:getAvailableSources(book)
@@ -661,6 +788,257 @@ function KindleFetch:getAvailableSources(book)
         table.insert(sources, "zlib")
     end
     return sources
+end
+
+function KindleFetch:getAvailableSourcesLabel(book)
+    local sources = self:getAvailableSources(book)
+    if #sources == 0 then
+        return _("Unknown")
+    end
+    local labels = {}
+    for _, source in ipairs(sources) do
+        table.insert(labels, SOURCE_LABELS[source] or source)
+    end
+    return table.concat(labels, ", ")
+end
+
+function KindleFetch:getCoverCachePath(book)
+    local cover_url = util.trim(book.cover_url or "")
+    if cover_url == "" then
+        return nil
+    end
+    local cover_id = util.trim(book.md5 or "")
+    if cover_id == "" then
+        cover_id = cover_url:gsub("[^%w]", "_")
+    end
+    if cover_id == "" then
+        return nil
+    end
+    local ext = cover_url:match("%.([A-Za-z0-9]+)[%?]") or cover_url:match("%.([A-Za-z0-9]+)$")
+    ext = ext and ext:lower() or "jpg"
+    if ext ~= "jpg" and ext ~= "jpeg" and ext ~= "png" and ext ~= "webp" and ext ~= "gif" and ext ~= "bmp" then
+        ext = "jpg"
+    end
+    return string.format("/tmp/kf_cover_%s.%s", cover_id, ext)
+end
+
+function KindleFetch:isValidCoverFile(path)
+    local fd = io.open(path, "rb")
+    if not fd then
+        return false
+    end
+    local header = fd:read(16) or ""
+    fd:close()
+    if #header < 4 then
+        return false
+    end
+    if header:sub(1, 2) == "\255\216" then
+        return true -- JPEG
+    end
+    if header:sub(1, 8) == "\137PNG\r\n\026\n" then
+        return true -- PNG
+    end
+    if header:sub(1, 4) == "GIF8" then
+        return true -- GIF
+    end
+    if header:sub(1, 2) == "BM" then
+        return true -- BMP
+    end
+    if header:sub(1, 4) == "RIFF" and header:sub(9, 12) == "WEBP" then
+        return true -- WEBP
+    end
+    return false
+end
+
+function KindleFetch:prefetchResultCovers(results)
+    if not results or #results == 0 then
+        return
+    end
+
+    for _, book in ipairs(results) do
+        local cover_path = self:getCoverCachePath(book)
+        if cover_path and self:isValidCoverFile(cover_path) then
+            book._cover_path = cover_path
+        end
+    end
+
+    self:spawnBridgeCommand({ "cache-covers", })
+end
+
+function KindleFetch:getBookCoverPath(book, allow_download)
+    if not book then
+        return nil, _("No cover image available.")
+    end
+
+    if book._cover_path and lfs.attributes(book._cover_path, "mode") == "file" then
+        if self:isValidCoverFile(book._cover_path) then
+            return book._cover_path
+        end
+        os.remove(book._cover_path)
+        book._cover_path = nil
+    end
+
+    local cache_path = self:getCoverCachePath(book)
+    if not cache_path then
+        return nil, _("No cover image available.")
+    end
+
+    local cache_attr = lfs.attributes(cache_path)
+    if cache_attr and cache_attr.mode == "file" and cache_attr.size and cache_attr.size > 0 then
+        if self:isValidCoverFile(cache_path) then
+            book._cover_path = cache_path
+            return cache_path
+        end
+        os.remove(cache_path)
+    end
+
+    if not allow_download then
+        return nil, _("Cover image is not cached yet.")
+    end
+
+    local cover_url = util.trim(book.cover_url or "")
+    if cover_url == "" then
+        return nil, _("No cover image available.")
+    end
+
+    local Trapper = require("ui/trapper")
+    local cmd = "curl -L -s --max-time 30 --output "
+        .. util.shell_escape(cache_path)
+        .. " "
+        .. util.shell_escape(cover_url)
+        .. " 2>/dev/null"
+    local completed = Trapper:dismissablePopen(cmd, _("Fetching cover image... (tap to cancel)"))
+    Trapper:reset()
+
+    if not completed then
+        os.remove(cache_path)
+        return nil, _("Operation canceled.")
+    end
+    local attr = lfs.attributes(cache_path)
+    if not attr or attr.mode ~= "file" or not attr.size or attr.size == 0 or not self:isValidCoverFile(cache_path) then
+        os.remove(cache_path)
+        return nil, _("Could not download cover image.")
+    end
+    book._cover_path = cache_path
+    return cache_path
+end
+
+function KindleFetch:showBookCover(book, cover_path)
+    local path = cover_path
+    local err
+    if not path then
+        path, err = self:getBookCoverPath(book, false)
+    end
+    if not path then
+        UIManager:show(InfoMessage:new{
+            text = err,
+        })
+        return
+    end
+
+    local Screen = require("device").screen
+    local RenderImage = require("ui/renderimage")
+    local cover_bb = RenderImage:renderImageFile(path, false, Screen:getWidth(), Screen:getHeight())
+    if not cover_bb then
+        UIManager:show(InfoMessage:new{
+            text = _("Failed to decode the cover image."),
+            show_icon = true,
+        })
+        return
+    end
+
+    local ok, viewer_or_err = pcall(function()
+        local ImageViewer = require("ui/widget/imageviewer")
+        return ImageViewer:new{
+            image = cover_bb,
+            image_disposable = true,
+            fullscreen = true,
+            with_title_bar = false,
+        }
+    end)
+    if not ok or not viewer_or_err then
+        if cover_bb and cover_bb.free then
+            cover_bb:free()
+        end
+        UIManager:show(InfoMessage:new{
+            text = _("Failed to render the cover image."),
+            show_icon = true,
+        })
+        return
+    end
+    local shown_ok = pcall(function()
+        UIManager:show(viewer_or_err)
+    end)
+    if not shown_ok then
+        UIManager:show(InfoMessage:new{
+            text = _("Cover image viewer failed to open."),
+            show_icon = true,
+        })
+    end
+end
+
+function KindleFetch:showBookDetails(index, book)
+    local title = util.trim(book.title or "")
+    local author = util.trim(book.author or "")
+    local format = util.trim(book.format or "")
+    local size = util.trim(book.size or "")
+    local description = util.trim(util.htmlToPlainTextIfHtml(book.description or ""))
+
+    if title == "" then title = _("Untitled") end
+    if author == "" then author = _("Unknown author") end
+    if format == "" then format = "?" end
+    if size == "" then size = _("Unknown size") end
+    if description == "" then description = _("No description available.") end
+
+    local info = title .. "\n"
+        .. _("Author: ") .. author .. "\n"
+        .. _("Format: ") .. format .. "  " .. _("Size: ") .. size .. "\n"
+        .. _("Sources: ") .. self:getAvailableSourcesLabel(book) .. "\n\n"
+        .. description
+
+    if #info > 800 then
+        info = info:sub(1, 800) .. "\n..."
+    end
+
+    local available = self:getAvailableSources(book)
+    if #available == 0 then
+        available = { "lgli", "zlib" }
+    end
+
+    local dialog
+    local buttons = {}
+
+    -- One download button per available source — goes straight to download with progress.
+    for i, source in ipairs(available) do
+        local src = source
+        table.insert(buttons, {
+            {
+                text = T(_("Download via %1"), SOURCE_LABELS[src] or src),
+                callback = function()
+                    UIManager:close(dialog)
+                    UIManager:nextTick(function()
+                        self:downloadBook(index, src)
+                    end)
+                end,
+            },
+        })
+    end
+
+    table.insert(buttons, {
+        {
+            text = _("Back"),
+            callback = function()
+                UIManager:close(dialog)
+            end,
+        },
+    })
+
+    dialog = ButtonDialog:new{
+        title = info,
+        buttons = buttons,
+        width_factor = 0.9,
+    }
+    UIManager:show(dialog)
 end
 
 function KindleFetch:onSelectResult(index, book)
@@ -701,13 +1079,14 @@ function KindleFetch:showSourcePicker(index, book, available)
 
     local buttons = {}
     for _, source in ipairs(sources) do
-        local source_label = SOURCE_LABELS[source] or source
+        local selected_source = source
+        local source_label = SOURCE_LABELS[selected_source] or selected_source
         table.insert(buttons, {
             {
                 text = T(_("Download via %1"), source_label),
                 callback = function()
                     UIManager:close(dialog)
-                    self:confirmDownload(index, book, source)
+                    self:confirmDownload(index, book, selected_source)
                 end,
             },
         })
