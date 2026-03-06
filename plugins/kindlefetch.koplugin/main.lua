@@ -84,45 +84,9 @@ function KindleFetch:addToMainMenu(menu_items)
     menu_items.kindlefetch = {
         text = _("KindleFetch"),
         sorting_hint = "tools",
-        sub_item_table = {
-            {
-                text = _("Search and download books"),
-                separator = true,
-                callback = function()
-                    self:onKindleFetchSearch()
-                end,
-            },
-            {
-                text_func = function()
-                    return T(_("Default source: %1"), SOURCE_LABELS[self.default_source])
-                end,
-                keep_menu_open = true,
-                sub_item_table = self:getDefaultSourceSubmenu(),
-            },
-            {
-                text_func = function()
-                    return T(_("Search filter: %1"), FILTER_LABELS[self.source_filter])
-                end,
-                keep_menu_open = true,
-                sub_item_table = self:getSourceFilterSubmenu(),
-            },
-            {
-                text = _("Set KindleFetch root path"),
-                callback = function()
-                    self:onKindleFetchSetRoot()
-                end,
-            },
-            {
-                text_func = function()
-                    local root = self:getKindleFetchRoot()
-                    if root then
-                        return T(_("Detected root: %1"), BD.dirpath(root))
-                    end
-                    return _("Detected root: not found")
-                end,
-                enabled = false,
-            },
-        },
+        callback = function()
+            self:onKindleFetchSearch()
+        end,
     }
 end
 
@@ -201,7 +165,7 @@ function KindleFetch:setSourceFilter(filter)
 end
 
 function KindleFetch:onKindleFetchSearch()
-    self:showSearchDialog(self.last_query)
+    self:openBrowser()
     return true
 end
 
@@ -246,6 +210,275 @@ function KindleFetch:getKindleFetchRoot()
         end
     end
     return nil
+end
+
+function KindleFetch:openBrowser()
+    if self.browser and self.browser:isShown() then
+        self.browser:refresh()
+        return true
+    end
+
+    local Browser = require("browser")
+    self.browser = Browser:new{
+        manager = self,
+    }
+    self.browser:show()
+    return true
+end
+
+function KindleFetch:refreshBrowser()
+    if self.browser and self.browser:isShown() then
+        self.browser:refresh()
+    end
+end
+
+function KindleFetch:onBrowserClosed()
+    self.browser = nil
+end
+
+function KindleFetch:onClose()
+    if self.browser and self.browser:isShown() then
+        self.browser:close()
+    end
+end
+
+function KindleFetch:onCloseWidget()
+    if self.browser and self.browser:isShown() then
+        self.browser:close()
+    end
+end
+
+function KindleFetch:getBrowserTitle()
+    if self.search_state then
+        return T(
+            _("KindleFetch: %1 (page %2/%3)"),
+            self.search_state.query,
+            self.search_state.page,
+            self.search_state.last_page
+        )
+    end
+    return _("KindleFetch")
+end
+
+function KindleFetch:getBrowserItemTable()
+    local items = {}
+    local state = self.search_state
+    local root = self:getKindleFetchRoot()
+
+    if state then
+        table.insert(items, {
+            text = _("New search"),
+            mandatory = T(_("Current: %1"), state.query),
+            action = "search",
+        })
+        if state.page > 1 then
+            table.insert(items, {
+                text = _("Previous page"),
+                action = "page_prev",
+            })
+        end
+        if state.page < state.last_page then
+            table.insert(items, {
+                text = _("Next page"),
+                action = "page_next",
+            })
+        end
+    else
+        table.insert(items, {
+            text = _("Start new search"),
+            action = "search",
+        })
+    end
+
+    table.insert(items, {
+        text = T(_("Default source: %1"), SOURCE_LABELS[self.default_source]),
+        action = "default_source",
+    })
+    table.insert(items, {
+        text = T(_("Search filter: %1"), FILTER_LABELS[self.source_filter]),
+        action = "source_filter",
+    })
+    table.insert(items, {
+        text = _("Set KindleFetch root path"),
+        action = "set_root",
+    })
+    table.insert(items, {
+        text = root and T(_("Detected root: %1"), BD.dirpath(root)) or _("Detected root: not found"),
+        enabled = false,
+    })
+
+    if not state then
+        return items
+    end
+
+    table.insert(items, {
+        text = T(_("Results (%1)"), #state.results),
+        enabled = false,
+    })
+    if #state.results == 0 then
+        table.insert(items, {
+            text = _("No results on this page."),
+            enabled = false,
+        })
+        return items
+    end
+
+    for i, book in ipairs(state.results) do
+        local title = util.trim(book.title or "")
+        local author = util.trim(book.author or "")
+        local format = util.trim(book.format or "")
+        if title == "" then
+            title = _("Untitled")
+        end
+        if author == "" then
+            author = _("Unknown author")
+        end
+        if format == "" then
+            format = "?"
+        end
+        table.insert(items, {
+            text = title,
+            mandatory = T("%1 | %2", author, format),
+            action = "result",
+            result_index = i,
+            book = book,
+        })
+    end
+
+    return items
+end
+
+function KindleFetch:onBrowserItemSelected(item)
+    if not item or not item.action then
+        return
+    end
+
+    if item.action == "search" then
+        self:showSearchDialog(self.last_query)
+        return
+    end
+    if item.action == "page_prev" and self.search_state then
+        self:startSearch(self.search_state.query, self.search_state.page - 1)
+        return
+    end
+    if item.action == "page_next" and self.search_state then
+        self:startSearch(self.search_state.query, self.search_state.page + 1)
+        return
+    end
+    if item.action == "default_source" then
+        self:showDefaultSourceDialog()
+        return
+    end
+    if item.action == "source_filter" then
+        self:showSourceFilterDialog()
+        return
+    end
+    if item.action == "set_root" then
+        self:showSetRootDialog()
+        return
+    end
+    if item.action == "result" and item.result_index and item.book then
+        self:onSelectResult(item.result_index, item.book)
+        return
+    end
+end
+
+function KindleFetch:showDefaultSourceDialog()
+    local dialog
+    dialog = ButtonDialog:new{
+        title = _("Default source"),
+        buttons = {
+            {
+                {
+                    text = SOURCE_LABELS.ask,
+                    callback = function()
+                        UIManager:close(dialog)
+                        self:setDefaultSource("ask")
+                        self:refreshBrowser()
+                    end,
+                },
+            },
+            {
+                {
+                    text = SOURCE_LABELS.lgli,
+                    callback = function()
+                        UIManager:close(dialog)
+                        self:setDefaultSource("lgli")
+                        self:refreshBrowser()
+                    end,
+                },
+            },
+            {
+                {
+                    text = SOURCE_LABELS.zlib,
+                    callback = function()
+                        UIManager:close(dialog)
+                        self:setDefaultSource("zlib")
+                        self:refreshBrowser()
+                    end,
+                },
+            },
+            {
+                {
+                    text = _("Cancel"),
+                    callback = function()
+                        UIManager:close(dialog)
+                    end,
+                },
+            },
+        },
+        width_factor = 0.7,
+    }
+    UIManager:show(dialog)
+end
+
+function KindleFetch:showSourceFilterDialog()
+    local dialog
+    dialog = ButtonDialog:new{
+        title = _("Search filter"),
+        buttons = {
+            {
+                {
+                    text = FILTER_LABELS.all,
+                    callback = function()
+                        UIManager:close(dialog)
+                        self:setSourceFilter("all")
+                        self:refreshBrowser()
+                    end,
+                },
+            },
+            {
+                {
+                    text = FILTER_LABELS.lgli,
+                    callback = function()
+                        UIManager:close(dialog)
+                        self:setSourceFilter("lgli")
+                        self:refreshBrowser()
+                    end,
+                },
+            },
+            {
+                {
+                    text = FILTER_LABELS.zlib,
+                    callback = function()
+                        UIManager:close(dialog)
+                        self:setSourceFilter("zlib")
+                        self:refreshBrowser()
+                    end,
+                },
+            },
+            {
+                {
+                    text = _("Cancel"),
+                    callback = function()
+                        UIManager:close(dialog)
+                    end,
+                },
+            },
+        },
+        width_factor = 0.7,
+    }
+    UIManager:show(dialog)
 end
 
 function KindleFetch:getBridgePath()
@@ -413,108 +646,9 @@ function KindleFetch:readSearchResults(path)
     return decoded
 end
 
-function KindleFetch:closeResultsDialog()
-    if self.results_dialog then
-        UIManager:close(self.results_dialog)
-        self.results_dialog = nil
-    end
-end
-
-function KindleFetch:formatResultText(index, book)
-    local title = util.trim(book.title or "")
-    local author = util.trim(book.author or "")
-    local format = util.trim(book.format or "")
-    if title == "" then
-        title = _("Untitled")
-    end
-    if author == "" then
-        author = _("Unknown author")
-    end
-    if format == "" then
-        format = "?"
-    end
-    return T("%1. %2\n%3 | %4", index, title, author, format)
-end
-
 function KindleFetch:showResultsDialog()
-    self:closeResultsDialog()
-
-    if not self.search_state then
-        return
-    end
-
-    local state = self.search_state
-    local buttons = {
-        {
-            {
-                text = _("New search"),
-                callback = function()
-                    self:closeResultsDialog()
-                    self:showSearchDialog(state.query)
-                end,
-            },
-            {
-                text = _("Settings"),
-                callback = function()
-                    self:closeResultsDialog()
-                    self:showSetRootDialog()
-                end,
-            },
-        },
-        {
-            {
-                text = _("Previous page"),
-                enabled = state.page > 1,
-                callback = function()
-                    self:closeResultsDialog()
-                    self:startSearch(state.query, state.page - 1)
-                end,
-            },
-            {
-                text = _("Next page"),
-                enabled = state.page < state.last_page,
-                callback = function()
-                    self:closeResultsDialog()
-                    self:startSearch(state.query, state.page + 1)
-                end,
-            },
-        },
-    }
-
-    if #state.results == 0 then
-        table.insert(buttons, {
-            {
-                text = _("No results on this page."),
-                enabled = false,
-                align = "left",
-            },
-        })
-    else
-        for i, book in ipairs(state.results) do
-            local index = i
-            table.insert(buttons, {
-                {
-                    text = self:formatResultText(index, book),
-                    align = "left",
-                    callback = function()
-                        self:closeResultsDialog()
-                        self:onSelectResult(index, book)
-                    end,
-                },
-            })
-        end
-    end
-
-    self.results_dialog = ButtonDialog:new{
-        title = T(_("KindleFetch: %1 (page %2/%3)"), state.query, state.page, state.last_page),
-        width_factor = 0.95,
-        rows_per_page = { 5, 7, 9 },
-        tap_close_callback = function()
-            self.results_dialog = nil
-        end,
-        buttons = buttons,
-    }
-    UIManager:show(self.results_dialog)
+    self:openBrowser()
+    self:refreshBrowser()
 end
 
 function KindleFetch:getAvailableSources(book)
@@ -718,6 +852,7 @@ function KindleFetch:showSetRootDialog()
                                 text = _("Using automatic KindleFetch path detection."),
                                 timeout = 4,
                             })
+                            self:refreshBrowser()
                             return
                         end
 
@@ -737,6 +872,7 @@ function KindleFetch:showSetRootDialog()
                             text = T(_("KindleFetch root set to:\n%1"), BD.dirpath(normalized)),
                             timeout = 5,
                         })
+                        self:refreshBrowser()
                     end,
                 },
             },
