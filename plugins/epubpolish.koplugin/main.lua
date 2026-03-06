@@ -5,6 +5,7 @@ local Dispatcher = require("dispatcher")
 local InfoMessage = require("ui/widget/infomessage")
 local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
+local filemanagerutil = require("apps/filemanager/filemanagerutil")
 local ffiUtil = require("ffi/util")
 local lfs = require("libs/libkoreader-lfs")
 local logger = require("logger")
@@ -18,6 +19,7 @@ local SETTINGS_KEYS = {
     compatibility_ascii_dashes = "epub_polish_compatibility_ascii_dashes",
     join_linebreak_hyphen = "epub_polish_join_linebreak_hyphen",
     open_after_polish = "epub_polish_open_after_polish",
+    last_input_file = "epub_polish_last_input_file",
 }
 
 local TEXT_EXTENSIONS = {
@@ -54,7 +56,7 @@ local MINUS_SIGN = "\xE2\x88\x92"
 
 local EpubPolish = WidgetContainer:extend{
     name = "epubpolish",
-    is_doc_only = true,
+    is_doc_only = false,
 }
 
 function EpubPolish:onDispatcherRegisterActions()
@@ -63,6 +65,13 @@ function EpubPolish:onDispatcherRegisterActions()
         event = "PolishCurrentEpub",
         title = _("Polish current EPUB"),
         reader = true,
+    })
+    Dispatcher:registerAction("polish_epub_file", {
+        category = "none",
+        event = "ChooseEpubForPolish",
+        title = _("Polish EPUB file"),
+        reader = true,
+        filemanager = true,
     })
 end
 
@@ -100,13 +109,20 @@ end
 
 function EpubPolish:addToMainMenu(menu_items)
     menu_items.polish_current_epub = {
-        text = _("Polish current EPUB"),
-        sorting_hint = "tools",
-        enabled_func = function()
-            return self:getCurrentEpubPath() ~= nil
+        text_func = function()
+            if self:getCurrentEpubPath() then
+                return _("Polish current EPUB")
+            end
+            return _("Polish EPUB file...")
         end,
+        sorting_hint = "tools",
         callback = function()
-            self:onPolishCurrentEpub()
+            local current = self:getCurrentEpubPath()
+            if current then
+                self:onPolishPath(current)
+            else
+                self:onChooseEpubForPolish()
+            end
         end,
     }
 
@@ -115,13 +131,26 @@ function EpubPolish:addToMainMenu(menu_items)
         sorting_hint = "more_tools",
         sub_item_table = {
             {
-                text = _("Polish current EPUB"),
-                separator = true,
-                enabled_func = function()
-                    return self:getCurrentEpubPath() ~= nil
+                text_func = function()
+                    if self:getCurrentEpubPath() then
+                        return _("Polish current EPUB")
+                    end
+                    return _("Polish EPUB file...")
                 end,
+                separator = true,
                 callback = function()
-                    self:onPolishCurrentEpub()
+                    local current = self:getCurrentEpubPath()
+                    if current then
+                        self:onPolishPath(current)
+                    else
+                        self:onChooseEpubForPolish()
+                    end
+                end,
+            },
+            {
+                text = _("Choose EPUB from file browser"),
+                callback = function()
+                    self:onChooseEpubForPolish()
                 end,
             },
             {
@@ -193,6 +222,52 @@ function EpubPolish:isEpubPath(path)
         and util.getFileNameSuffix(path):lower() == "epub"
 end
 
+function EpubPolish:onChooseEpubForPolish()
+    local chooser_path
+    if self.ui and self.ui.file_chooser and self.ui.file_chooser.path then
+        -- In File Manager, always start from the currently browsed directory.
+        chooser_path = self.ui.file_chooser.path
+    else
+        chooser_path = G_reader_settings:readSetting(SETTINGS_KEYS.last_input_file)
+    end
+
+    if chooser_path then
+        local mode = lfs.attributes(chooser_path, "mode")
+        if mode == "file" then
+            chooser_path = ffiUtil.dirname(chooser_path)
+        elseif mode ~= "directory" then
+            chooser_path = nil
+        end
+    end
+    if not chooser_path then
+        chooser_path = G_reader_settings:readSetting("home_dir") or filemanagerutil.getDefaultDir()
+    end
+
+    local file_filter = function(path)
+        return util.getFileNameSuffix(path):lower() == "epub"
+    end
+    local caller_callback = function(path)
+        if self:isEpubPath(path) then
+            G_reader_settings:saveSetting(SETTINGS_KEYS.last_input_file, path)
+            self:onPolishPath(path)
+        else
+            UIManager:show(InfoMessage:new{
+                text = _("Please choose a valid EPUB file."),
+            })
+        end
+    end
+    local PathChooser = require("ui/widget/pathchooser")
+    UIManager:show(PathChooser:new{
+        select_directory = false,
+        select_file = true,
+        show_files = true,
+        file_filter = file_filter,
+        path = chooser_path,
+        onConfirm = caller_callback,
+    })
+    return true
+end
+
 function EpubPolish:getOutputPath(input_path)
     local directory, filename = util.splitFilePathName(input_path)
     local base_name, suffix = util.splitFileNameSuffix(filename)
@@ -235,7 +310,16 @@ function EpubPolish:onPolishCurrentEpub()
         })
         return true
     end
+    return self:onPolishPath(input_path)
+end
 
+function EpubPolish:onPolishPath(input_path)
+    if not self:isEpubPath(input_path) then
+        UIManager:show(InfoMessage:new{
+            text = _("Selected file is not a valid EPUB."),
+        })
+        return true
+    end
     local output_path = self:getOutputPath(input_path)
     local transforms = self:getTransformSummary()
     UIManager:show(ConfirmBox:new{
@@ -296,7 +380,7 @@ function EpubPolish:runPolish(input_path, output_path)
                 text = text .. "\n\n" .. _("Open polished EPUB now?"),
                 ok_text = _("Open"),
                 ok_callback = function()
-                    require("apps/reader/readerui"):showReader(output_path)
+                    self:openOutputFile(output_path)
                 end,
             })
         else
@@ -306,6 +390,18 @@ function EpubPolish:runPolish(input_path, output_path)
             })
         end
     end)
+end
+
+function EpubPolish:openOutputFile(path)
+    if self.ui and self.ui.document then
+        require("apps/reader/readerui"):showReader(path)
+        return
+    end
+    if self.ui and self.ui.openFile then
+        self.ui:openFile(path)
+        return
+    end
+    require("apps/reader/readerui"):showReader(path)
 end
 
 function EpubPolish:isTextPath(path)
