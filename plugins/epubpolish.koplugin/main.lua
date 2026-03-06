@@ -15,6 +15,7 @@ local T = ffiUtil.template
 local SETTINGS_KEYS = {
     remove_soft_hyphens = "epub_polish_remove_soft_hyphens",
     smarten_double_hyphen = "epub_polish_smarten_double_hyphen",
+    compatibility_ascii_dashes = "epub_polish_compatibility_ascii_dashes",
     join_linebreak_hyphen = "epub_polish_join_linebreak_hyphen",
     open_after_polish = "epub_polish_open_after_polish",
 }
@@ -48,6 +49,8 @@ local STORE_EXTENSIONS = {
 local MAX_TEXT_FILE_BYTES = 4 * 1024 * 1024
 local SOFT_HYPHEN = "\xC2\xAD"
 local EM_DASH = "\xE2\x80\x94"
+local DASH_FAMILY_PATTERN = "[\xE2][\x80][\x90-\x95]"
+local MINUS_SIGN = "\xE2\x88\x92"
 
 local EpubPolish = WidgetContainer:extend{
     name = "epubpolish",
@@ -73,6 +76,7 @@ end
 function EpubPolish:loadSettings()
     self.remove_soft_hyphens = self:readBool(SETTINGS_KEYS.remove_soft_hyphens, true)
     self.smarten_double_hyphen = self:readBool(SETTINGS_KEYS.smarten_double_hyphen, true)
+    self.compatibility_ascii_dashes = self:readBool(SETTINGS_KEYS.compatibility_ascii_dashes, false)
     self.join_linebreak_hyphen = self:readBool(SETTINGS_KEYS.join_linebreak_hyphen, false)
     self.open_after_polish = self:readBool(SETTINGS_KEYS.open_after_polish, true)
 end
@@ -139,6 +143,16 @@ function EpubPolish:addToMainMenu(menu_items)
                 end,
             },
             {
+                text = _("Compatibility mode: remove Unicode dash artifacts"),
+                help_text = _("Converts word<dash>word to word word and removes leading dash markers such as <dash>Heading."),
+                checked_func = function()
+                    return self.compatibility_ascii_dashes
+                end,
+                callback = function()
+                    self:toggleOption("compatibility_ascii_dashes")
+                end,
+            },
+            {
                 text = _("Join line-break hyphenation (heuristic)"),
                 help_text = _("Joins words split as \"word-\\nnext\" when the next part starts with a lowercase ASCII letter."),
                 checked_func = function()
@@ -200,6 +214,9 @@ function EpubPolish:getTransformSummary()
     end
     if self.smarten_double_hyphen then
         table.insert(active, _("smarten double hyphens"))
+    end
+    if self.compatibility_ascii_dashes then
+        table.insert(active, _("compatibility mode: remove Unicode dash artifacts"))
     end
     if self.join_linebreak_hyphen then
         table.insert(active, _("join line-break hyphenation (heuristic)"))
@@ -318,6 +335,28 @@ function EpubPolish:applyTransforms(content)
         local n
         content, n = content:gsub("%-%-", EM_DASH)
         total_replacements = total_replacements + n
+    end
+
+    if self.compatibility_ascii_dashes then
+        local n
+        -- In noisy OCR/conversion sources, Unicode dashes are often artifacts.
+        -- Heuristic:
+        -- - word<dash>word -> word word
+        -- - ><dash>Heading -> >Heading
+        -- - remaining Unicode dashes -> space
+        content, n = content:gsub("([%w])" .. DASH_FAMILY_PATTERN .. "([%w])", "%1 %2")
+        total_replacements = total_replacements + n
+        content, n = content:gsub("([%w])" .. MINUS_SIGN .. "([%w])", "%1 %2")
+        total_replacements = total_replacements + n
+        content, n = content:gsub(">%s*" .. DASH_FAMILY_PATTERN .. "%s*", ">")
+        total_replacements = total_replacements + n
+        content, n = content:gsub(">%s*" .. MINUS_SIGN .. "%s*", ">")
+        total_replacements = total_replacements + n
+        content, n = content:gsub(DASH_FAMILY_PATTERN, " ")
+        total_replacements = total_replacements + n
+        content, n = content:gsub(MINUS_SIGN, " ")
+        total_replacements = total_replacements + n
+        content = content:gsub("[ \t][ \t]+", " ")
     end
 
     return content, total_replacements
